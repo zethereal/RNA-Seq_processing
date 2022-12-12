@@ -1,0 +1,153 @@
+---
+title: "RNASeq Processing Pipeline"
+author: "Z. Kartje"
+date: "2022-11-01"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Outline
+- Introduction
+- Remove adapters
+- Check read quality
+- Alignment/Quantification
+- Generate counts table
+- Analysis
+
+### Introduction
+This is a brief introduction into the processing of RNA Seq data for the purposes of differential gene expression; starting from fastq files until analysis in R. You will need GHPCC cluster access (granted by UMass IT admins) and a basic understanding navigating the Linux environment.
+
+### Remove adapters
+Reads are sequenced with the library kit-specific adapter sequences still attached to the RNA strands. These must be removed from the RNA reads before they are aligned to the genome to improve specificity and speed of alignment. Using Trimmomatic V0.32, one can remove Illumina adapter sequences (e.g.) from your FASTQ files. Files compressed using either 'gzip' or 'bzip2' are supported in Trimmomatic. See the [manual](http://www.usadellab.org/cms/uploads/supplementary/Trimmomatic/TrimmomaticManual_V0.32.pdf) from the Usadel Lab for more information.
+Before beginning, navigate to the cluster and the desired working directory. Make a folder for yourself if you don't already have one. Organize your outputs by creating discrete folders based on the operation you're carrying out. 
+E.g.:
+```
+cd /nl/umw_jonathan_watts/user1/RNASeq/
+```
+Then make a directory for trimming
+```
+mkdir trimming
+```
+
+**Usage**
+
+Here is the general command format:
+```
+java -jar <path to trimmomatic jar> SE | PE [-threads <threads>] [-phred33 | -phred64] [-trimlog <logFile>] <input> <output> <FUNCTION>: < add. arguments>
+```
+
+Single end (`SE`) or paired end (`PE`) reads should be specified. Additionally, a function must be specified. (e.g. ILLUMINACLIP call will truncate reads that match stored Illumina adapter sequences. 
+
+ILLUMINACLIP arguments:
+```
+ILLUMINACLIP:<fastaWithAdaptersEtc>:<seed mismatches>:<palindrome clip threshold>:<simple clip threshold>
+```
+
+Start by loading the program
+```
+module load trimmomatic/0.32
+```
+Truncation is performed by calling the program with filetype specification (`.jar`), naming mode with single-end (`SE`) sequencing, enumerating thread count (`-threads 5`), supplying `.gz` filename with path, output filepath, and reference adapter `.fa` name and location (along with clipping preferences)
+
+```
+java -jar /path/to/program/trimmomatic-0.32.jar SE -threads 5 /path/to/input/file.gz /path/to/output/file_prefix ILLUMINACLIP:/path/to/ref/adapters.fa:2:30:10:8:TRUE
+```
+
+If an error file is specified when the job is ran using `-e errorfilename.txt`, a `.txt` file like the one below will be generated when the run is complete. This will include how many reads were dropped after comparing the reads against Illumina adapter sequences (145 in this case). 
+
+![Trim error file](C:/Users/zkart/Desktop/trim_err_file.png)
+
+The output files following trimming are `.fq.gz` files (with an error and output file, assuming they were specified in the job submission).
+
+
+### Check read quality
+Once the adapter sequences have been removed, the truncated reads can be ran through a QC step to ensure the previous step was successful and the quality of the reads is high. In this tutorial, we will use FastQC to determine the 'adapter content' of the libraries. The [manual](https://www.bioinformatics.babraham.ac.uk/projects/fastqc/) is available online at the Babraham Bioinformatics site. 
+
+FastQC is a lightweight program and has simple command calling. It requires the program call, an input file, and an output path. It operates on a single file at a time, and will not proceed until the current file is processed. 
+
+**Usage**
+
+Start by loading the FastQC program
+```
+module load fastqc/0.11.5
+```
+Initiate analysis by calling the program, specifying the  `.gz` file to be analyzed, then specifying the output path with `-o`.
+```
+fastqc /path/to/input/file.gz -o /path/to/output/fastqc/
+```
+FastQC will output several files describing the details of the run. Perhaps the most important, a `summary.txt` file is generated that gives a `PASS`, `FAIL`, or `WARN` qualifier to several distinct categories of the library. If Trimmomatic and FastQC were run successfully, a `PASS` should be visible next to `Adapter Content` in the `summary.txt` file (see example image below). 
+
+![FastQC summary](C:/Users/zkart/Desktop/fastqc_sum_file.png)
+
+An `.html` file is also included. This way, the results can be viewed in a graphical manner online. Additional details of the results and run are provided in the `data.txt`.
+
+
+### Alignment/Quantification
+Now that we have trimmed, high-quality reads, we can (pseudo) align them to the genome or transcriptome of interest. Either method (alignment or pseudoalignment) can yield relative expression levels of genes of interest. STAR is a reliable and established alignment tool. It takes a `.fq` files and finds the exact location of the genome where the reads most likely came from. It outputs a `.bam` file with genomic coordinates. This information can be converted into gene expression values with downstream programs. Alternatively, Kallisto and Salmon are both quantifiers that use pseudoalignment, to the transcriptome instead of the genome. This drastically reduces the duration of analysis and resources required compared to standalone aligners like STAR. There are pros and cons to both when in search of analyzing gene expression. In this dataset, STAR is used when performing differential gene expression and statistical comparisons. Kallisto and Salmon are more appropriate when searching for broad expression trends, when statistics are not necessary. We will discuss STAR and Kallisto below. 
+
+Before alignment and analysis can be performed, a reference genome is required to supply a baseline for comparison for your data. If you do not already have one, a genome must be generated. This is typically assembled using a fasta sequence of the genome for the species of interest (mouse, human etc.) with an annotation `.gtf` file. These are available online at [Ensembl](https://useast.ensembl.org/info/data/ftp/index.html).
+
+For pseudoalignment and quantifying to the transcriptome (not for differential gene expression), see Pseudoalignment below. For alignment and then counts table generation, see the section `Alignment (to genome)` below. 
+
+#### Pseudoalignment (to transcriptome)
+Though [Salmon](https://combine-lab.github.io/salmon/getting_started/) is another viable option, we will use [Kallisto](https://pachterlab.github.io/kallisto/manual) as it supports compressed file inputs natively and is slightly quicker. Two main operations are required for gene expression analysis. `kallisto index` to create the reference transcriptome, and `kallisto quant` to quantify your reads against your reference. 
+
+**Usage**
+
+Assuming you are connected to the cluster, start by loading Kallisto module
+```
+module load kallisto/0.46.2
+```
+Locate the genome `.fa` file and note the path if it is not in your current working directory. We will build an index using the `kallisto index` command followed by your arguments. 
+Name the new index using `-i` argument followed by the name. You can specify kmer length with `-k` but it is not required. We will use the default of 31.
+e.g.:
+```
+kallisto index -i new_index_name -k 31 hg38_v34_fq.gz
+```
+
+#### Mapping and quantification
+We will align reads to our newly constructed transcriptome using the `kallisto quant` command. Default mode is using paired end reads. Single end reads can be specified with `--single` flag. The `--single-overhang` option does not discard reads where expected fragment size goes beyond the transcription start. See the manual for more details. `kallisto quant` will produce 3 files by default; `abundance.h5`, `abundance.tsv`, and `run_info.json`. A `.gtf` file is required if you are performing split read assignments. Index specification and output filepath are the only required arguments.  
+
+**Usage**
+
+`kallisto quant` will call the program and function. Follow with new index name using `-i`, output filepath with `-o`, and `fq.gz` names including the filepaths if they are not in your working directory. 
+
+e.g.for paired end reads
+```
+kallisto quant -i path/to/new/index.idx -o path/to/output/ fasta1.1_fq.gz fasta1.2_fq.gz
+```
+Depending on settings, Kallisto will produce 2-3 files in your output directory: `run_info.json`, `abundance.tsv`, and an optional `abundance.h5`. These can be directly imported into R for analysis. See below for details. 
+
+### Alignment (to genome)
+[STAR](https://physiology.med.cornell.edu/faculty/skrabanek/lab/angsd/lecture_notes/STARmanual.pdf) is a splice-aware aligner used to assign reads to a specific site of the genome. It needs to be combined with a downstream program (such as HTSeq in Python, or Rsubread in R, both described below) to generate a counts table usable for gene expression analysis. STAR requires a genome to reference, just as Kallisto, using `--runMode genomeGenerate`. An `.fa` file of the genome of interest is required as well as a annotation `.gtf` file. The fasta file holds the raw sequence data while the `.gtf` supplies the specific labeling such as chromosome and location. 
+
+STAR should produce several files including `*sortedbyCoord.out.bam` and error file (if specified). If no errors occured, the error file should be empty and take no storage space. 
+
+![Empty STAR error file](C:/Users/zkart/Desktop/star_err_file.PNG)
+
+### Generate counts table
+Once the reads are assigned to a specific location of the genome, a table is then generated with gene IDs and number of reads. This can be done in Python (or with a Python session on the cluster) using HTSeq or in R using [Rsubread](https://bioconductor.org/packages/release/bioc/vignettes/Rsubread/inst/doc/SubreadUsersGuide.pdf), specifically featureCounts.
+In this tutorial, we will discuss [HTSeq](https://htseq.readthedocs.io/en/release_0.11.1/count.html). HTSeq operates in Python, but can be utilized on the cluster. HTSeq will populate a table with gene IDs in one column and the corresponding number of reads that match the gene in another column. Careful consideration must be taken to properly choose how the program deals with reads matching more than one feature (exon e.g.) or gene. This can be controlled with the `--nonunique` argument (see manual for more details). Several arguments are available for a customized analysis.
+Start by loading the necessary modules:
+
+**Usage**
+
+```
+module load python/2.7.9_packages/HTSeq/0.6.1
+module load python/2.7.14_packages/pysam/0.8.4
+```
+First call the program, specifying the mode with `-m` and the file format (`-f`) of choice. In this example, `bam` files will be used. Name the `.bam` file followed by the `.gtf` annotation file to generate a table. An extra `>.txt` was included to return a copy of the generated table to text (named `counttable.txt`) instead of simply outputting it to the console. 
+```
+python -m HTSeq.scripts.count -f bam path/to/aligned/file.bam path/to/annotation/file.gtf > counttable.txt
+```
+HTSeq should output a table that looks similar to below. 
+
+![HTSeq sample table](C:/Users/zkart/Desktop/htseq_table.PNG)
+
+### Analysis
+If differential gene expression analysis is desired for your data, there are several packages that can be utilized in R. Three major options are DESeq2, edgeR, and limma/voom. One option with excellent online resources for guided walkthroughs is DESeq2. This [tutorial](https://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html#htseq) is a great starting point. 
+
